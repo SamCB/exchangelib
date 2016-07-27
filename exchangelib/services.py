@@ -41,41 +41,11 @@ SHALLOW = 'Shallow'
 DEEP = 'Deep'
 SOFTDELETED = 'SoftDeleted'
 
-
 class EWSService:
     SERVICE_NAME = None  # The name of the SOAP service
-    element_container_name = None  # The name of the XML element wrapping the collection of returned items
-    extra_element_names = []  # Some services may return multiple item types. List them here.
 
-    def __init__(self, protocol, element_name=None):
+    def __init__(self, protocol):
         self.protocol = protocol
-        self.element_name = element_name
-
-    def payload(self, version, account, *args, **kwargs):
-        return wrap(content=self._get_payload(*args, **kwargs), version=version, account=account)
-
-    def _get_payload(self, *args, **kwargs):
-        raise NotImplementedError()
-
-    def _get_elements(self, payload, account=None):
-        assert isinstance(payload, ElementType)
-        try:
-            response = self._get_response_xml(payload=payload, account=account)
-            return self._get_elements_in_response(response=response)
-        except (ErrorQuotaExceeded, ErrorCannotDeleteObject, ErrorCreateItemAccessDenied, ErrorTimeoutExpired,
-                ErrorFolderNotFound, ErrorNonExistentMailbox, ErrorMailboxStoreUnavailable, ErrorImpersonateUserDenied,
-                ErrorInternalServerError, ErrorInternalServerTransientError, ErrorNoRespondingCASInDestinationSite,
-                ErrorImpersonationFailed, ErrorMailboxMoveInProgress, ErrorAccessDenied, ErrorConnectionFailed,
-                RateLimitError, ErrorServerBusy, ErrorTooManyObjectsOpened, ErrorInvalidLicense):
-            # These are known and understood, and don't require a backtrace
-            # TODO: ErrorTooManyObjectsOpened means there are too many connections to the database. We should be able to
-            # act on this by lowering the self.protocol connection pool size.
-            raise
-        except Exception:
-            # This may run from a thread pool, which obfuscates the stack trace. Print trace immediately.
-            log.warning('EWS %s, account %s: Exception in _get_elements: %s', self.protocol.ews_url, account,
-                        traceback.format_exc(20))
-            raise
 
     def _get_response_xml(self, payload, account=None):
         # Takes an XML tree and returns SOAP payload as an XML tree
@@ -162,26 +132,6 @@ class EWSService:
         raise SOAPError('SOAP error code: %s string: %s actor: %s detail: %s' % (
             faultcode, faultstring, faultactor, detail))
 
-    def _get_element_container(self, message, name=None):
-        assert isinstance(message, ElementType)
-        # ResponseClass: See http://msdn.microsoft.com/en-us/library/aa566424(v=EXCHG.140).aspx
-        response_class = message.get('ResponseClass')
-        # ResponseCode, MessageText: See http://msdn.microsoft.com/en-us/library/aa580757(v=EXCHG.140).aspx
-        response_code = get_xml_attr(message, '{%s}ResponseCode' % MNS)
-        msg_text = get_xml_attr(message, '{%s}MessageText' % MNS)
-        msg_xml = get_xml_attr(message, '{%s}MessageXml' % MNS)
-        if response_class == 'Success' and response_code == 'NoError':
-            if not name:
-                return True
-            container = message.find(name)
-            if container is None:
-                raise TransportError('No %s elements in ResponseMessage (%s)' % (name, xml_to_str(message)))
-            return container
-        if response_class == 'Warning':
-            return self._raise_warnings(code=response_code, text=msg_text, xml=msg_xml)
-        # rspclass == 'Error', or 'Success' and not 'NoError'
-        return self._raise_errors(code=response_code, text=msg_text, xml=msg_xml)
-
     def _raise_warnings(self, code, text, xml):
         try:
             return self._raise_errors(code=code, text=text, xml=xml)
@@ -202,6 +152,62 @@ class EWSService:
             # Should not happen
             raise TransportError('Unknown ResponseCode in ResponseMessage: %s (MessageText: %s, MessageXml: %s)' % (
                 code, text, xml)) from e
+
+
+class EWSElementService(EWSService):
+    element_container_name = None  # The name of the XML element wrapping the collection of returned items
+    extra_element_names = []  # Some services may return multiple item types. List them here.
+
+    def __init__(self, protocol, element_name=None):
+        super().__init__(protocol=protocol)
+        self.element_name = element_name
+
+    def payload(self, version, account, *args, **kwargs):
+        return wrap(content=self._get_payload(*args, **kwargs), version=version, account=account)
+
+    def _get_payload(self, *args, **kwargs):
+        raise NotImplementedError()
+
+    def _get_elements(self, payload, account=None):
+        assert isinstance(payload, ElementType)
+        try:
+            response = self._get_response_xml(payload=payload, account=account)
+            return self._get_elements_in_response(response=response)
+        except (ErrorQuotaExceeded, ErrorCannotDeleteObject, ErrorCreateItemAccessDenied, ErrorTimeoutExpired,
+                ErrorFolderNotFound, ErrorNonExistentMailbox, ErrorMailboxStoreUnavailable, ErrorImpersonateUserDenied,
+                ErrorInternalServerError, ErrorInternalServerTransientError, ErrorNoRespondingCASInDestinationSite,
+                ErrorImpersonationFailed, ErrorMailboxMoveInProgress, ErrorAccessDenied, ErrorConnectionFailed,
+                RateLimitError, ErrorServerBusy, ErrorTooManyObjectsOpened, ErrorInvalidLicense):
+            # These are known and understood, and don't require a backtrace
+            # TODO: ErrorTooManyObjectsOpened means there are too many connections to the database. We should be able to
+            # act on this by lowering the self.protocol connection pool size.
+            raise
+        except Exception:
+            # This may run from a thread pool, which obfuscates the stack trace. Print trace immediately.
+            log.warning('EWS %s, account %s: Exception in _get_elements: %s', self.protocol.ews_url, account,
+                        traceback.format_exc(20))
+            raise
+
+    def _get_element_container(self, message, name=None):
+        assert isinstance(message, ElementType)
+        # ResponseClass: See http://msdn.microsoft.com/en-us/library/aa566424(v=EXCHG.140).aspx
+        response_class = message.get('ResponseClass')
+        # ResponseCode, MessageText: See http://msdn.microsoft.com/en-us/library/aa580757(v=EXCHG.140).aspx
+        response_code = get_xml_attr(message, '{%s}ResponseCode' % MNS)
+        msg_text = get_xml_attr(message, '{%s}MessageText' % MNS)
+        msg_xml = get_xml_attr(message, '{%s}MessageXml' % MNS)
+        if response_class == 'Success' and response_code == 'NoError':
+            if not name:
+                return True
+            container = message.find(name)
+            if container is None:
+                raise TransportError('No %s elements in ResponseMessage (%s)' % (name, xml_to_str(message)))
+            return container
+        if response_class == 'Warning':
+            return self._raise_warnings(code=response_code, text=msg_text, xml=msg_xml)
+        # rspclass == 'Error', or 'Success' and not 'NoError'
+        return self._raise_errors(code=response_code, text=msg_text, xml=msg_xml)
+
 
     def _get_elements_in_response(self, response):
         assert isinstance(response, list)
@@ -227,18 +233,17 @@ class EWSService:
             elems.extend(container.findall(element_name))
         return elems
 
-
-class EWSAccountService(EWSService):
+class EWSAccountService(EWSElementService):
     def call(self, account, **kwargs):
         raise NotImplementedError()
 
 
-class EWSFolderService(EWSService):
+class EWSFolderService(EWSElementService):
     def call(self, folder, **kwargs):
         raise NotImplementedError()
 
 
-class PagingEWSService(EWSService):
+class PagingEWSService(EWSElementService):
     def _paged_call(self, **kwargs):
         # TODO This is awkward. The function must work with _get_payload() of both folder- and account-based services
         account = kwargs['folder'].account if 'folder' in kwargs else kwargs['account']
@@ -278,7 +283,7 @@ class PagingEWSService(EWSService):
         return rootfolder, next_offset
 
 
-class GetServerTimeZones(EWSService):
+class GetServerTimeZones(EWSElementService):
     SERVICE_NAME = 'GetServerTimeZones'
     element_container_name = '{%s}TimeZoneDefinitions' % MNS
 
@@ -305,7 +310,7 @@ class GetServerTimeZones(EWSService):
         return timezones
 
 
-class GetRoomLists(EWSService):
+class GetRoomLists(EWSElementService):
     SERVICE_NAME = 'GetRoomLists'
     element_container_name = '{%s}RoomLists' % MNS
 
@@ -324,7 +329,7 @@ class GetRoomLists(EWSService):
         return create_element('m:%s' % self.SERVICE_NAME)
 
 
-class GetRooms(EWSService):
+class GetRooms(EWSElementService):
     SERVICE_NAME = 'GetRooms'
     element_container_name = '{%s}Rooms' % MNS
 
@@ -345,7 +350,7 @@ class GetRooms(EWSService):
         return getrooms
 
 
-class EWSPooledService(EWSService):
+class EWSPooledService(EWSElementService):
     CHUNKSIZE = None
 
     def _pool_requests(self, account, payload_func, items, **kwargs):
@@ -561,3 +566,138 @@ class ResolveNames(EWSAccountService):
         if not n:
             raise AttributeError('"unresolvedentries" must not be empty')
         return payload
+
+class EWSStateService(EWSService):
+
+    def call(self, **kwargs):
+        raise NotImplementedError()
+
+class Subscribe(EWSStateService):
+    SERVICE_NAME = 'Subscribe'
+
+    PULL_SUBSCRIPTION = "PullSubscriptionRequest"
+    PUSH_SUBSCRIPTION = "PushSubscriptionRequest"
+
+    def __init__(self, protocol, subscription_type, **kwargs):
+        if subscription_type == self.PUSH_SUBSCRIPTION:
+            raise NotImplementedError("The only subscription currently implemented")
+        self.subscription_type = subscription_type
+        super().__init__(protocol=protocol, **kwargs)
+
+
+    def call(self, events, all_folders=False, folder_ids=None,
+             distinguished_folder_ids=None, timeout=10):
+        if folder_ids is None: folder_ids = []
+        if distinguished_folder_ids is None: distinguished_folder_ids = []
+
+        log.debug(
+            'Starting %s for events: %s folders: %s with timeout: %d',
+            self.subscription_type,
+            events,
+            'all folders' if all_folders else folder_ids + distinguished_folder_ids,
+            timeout
+        )
+
+        # Put together the xml request for starting the subscription
+        subscription = create_element("m:%s" % self.SERVICE_NAME)
+        if self.subscription_type == self.PULL_SUBSCRIPTION:
+            folder_ids = create_element("t:FolderIds")
+            if all_folders:
+                child_subscription = create_element("m:%s" % self.subscription_type,
+                                                    SubscribeToAllFolders="true")
+            else:
+                assert folder_ids or distinguished_folder_ids
+                child_subscription = create_element("m:%s" % self.subscription_type)
+                for folder in folder_ids:
+                    folder_ids.append(create_element("t:FolderId", Id=folder))
+                for folder in distinguished_folder_ids:
+                    folder_ids.append(create_element("t:DistinguishedFolderId",
+                                                     Id=folder))
+
+            child_subscription.append(folder_ids)
+
+            event_types = create_element("t:EventTypes")
+            for event in events:
+                add_xml_child(event_types, "t:EventType", event)
+            child_subscription.append(event_types)
+            child_subscription.append(create_element("t:Watermark"))
+            add_xml_child(child_subscription, "t:Timeout", timeout)
+
+        else:
+            raise NotImplementedError(
+                "%s currently not implemented" % self.subscription_type)
+
+        subscription.append(child_subscription)
+
+        sub_response = self._get_response_xml(payload=subscription)[0]
+
+        response_code = sub_response.find("{%s}ResponseCode" % MNS).text
+        # message_text should be None unless there is an error
+        message_text = sub_response.find("{%s}MessageText" % MNS)
+        if message_text is not None:
+            self._raise_errors(response_code, message_text.text, sub_response)
+
+
+        subscription_id = sub_response.find("{%s}SubscriptionId" % MNS).text
+        watermark = sub_response.find("{%s}Watermark" % MNS).text
+
+        return subscription_id, watermark
+
+class Unsubscribe(EWSStateService):
+    SERVICE_NAME = 'Unsubscribe'
+
+    def __init__(self, protocol):
+        super().__init__(protocol=protocol)
+
+    def call(self, subscription_id):
+        payload = create_element("m:%s" % self.SERVICE_NAME, xmlns=MNS)
+        add_xml_child(payload, "SubscriptionId", subscription_id)
+        unsub_response = self._get_response_xml(payload=payload)[0]
+
+        response_code = unsub_response.find("{%s}ResponseCode" % MNS).text
+        # message_text should be None unless there is an error
+        message_text = unsub_response.find("{%s}MessageText" % MNS)
+        if message_text is not None:
+            self._raise_errors(response_code, message_text.text, sub_response)
+
+        # If there wasn't anything, then we're free!!!!
+        return True
+
+class GetEvents(EWSStateService):
+    SERVICE_NAME = 'GetEvents'
+
+    def __init__(self, protocol):
+        super().__init__(protocol=protocol)
+
+    def call(self, subscription_id, watermark):
+        events = []
+        # We'll continue to make the calls until we are told that there are no
+        #  "MoreEvents" or until something goes wrong
+        while True:
+            payload = create_element("m:%s" % self.SERVICE_NAME, xmlns=MNS)
+            add_xml_child(payload, "SubscriptionId", subscription_id)
+            add_xml_child(payload, "Watermark", watermark)
+
+            event_response = self._get_response_xml(payload=payload)[0]
+
+            log.debug(xml_to_str(event_response))
+
+            response_code = event_response.find("{%s}ResponseCode" % MNS).text
+            # message_text should be None unless there is an error
+            message_text = event_response.find("{%s}MessageText" % MNS)
+            if message_text is not None:
+                self._raise_errors(response_code, message_text.text, sub_response)
+
+            notification = event_response.find("{%s}Notification" % MNS)
+
+            for element in notification:
+                if "Event" in element.tag and element.tag != "{%s}MoreEvents" % TNS:
+                    events.append(element)
+
+            watermark = notification.find("{%s}PreviousWatermark" % TNS).text
+
+            more_events = notification.find("{%s}MoreEvents" % TNS)
+            if more_events.text == "false":
+                break
+        log.debug("Events Found: %s" % str(events))
+        return events, watermark
