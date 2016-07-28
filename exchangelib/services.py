@@ -47,6 +47,12 @@ class EWSService:
     def __init__(self, protocol):
         self.protocol = protocol
 
+    def payload(self, version, account, *args, **kwargs):
+        return wrap(content=self._get_payload(*args, **kwargs), version=version, account=account)
+
+    def _get_payload(self, *args, **kwargs):
+        raise NotImplementedError()
+
     def _get_response_xml(self, payload, account=None):
         # Takes an XML tree and returns SOAP payload as an XML tree
         assert isinstance(payload, ElementType)
@@ -162,12 +168,6 @@ class EWSElementService(EWSService):
         super().__init__(protocol=protocol)
         self.element_name = element_name
 
-    def payload(self, version, account, *args, **kwargs):
-        return wrap(content=self._get_payload(*args, **kwargs), version=version, account=account)
-
-    def _get_payload(self, *args, **kwargs):
-        raise NotImplementedError()
-
     def _get_elements(self, payload, account=None):
         assert isinstance(payload, ElementType)
         try:
@@ -238,7 +238,7 @@ class EWSAccountService(EWSElementService):
         raise NotImplementedError()
 
 
-class EWSFolderService(EWSElementService):
+class EWSFolderService(EWSService):
     def call(self, folder, **kwargs):
         raise NotImplementedError()
 
@@ -504,7 +504,7 @@ class FindFolder(PagingEWSService, EWSFolderService):
         return findfolder
 
 
-class GetFolder(EWSFolderService):
+class GetFolder(EWSElementService, EWSFolderService):
     SERVICE_NAME = 'GetFolder'
     element_container_name = '{%s}Folders' % MNS
     # See http://msdn.microsoft.com/en-us/library/aa564009(v=exchg.150).aspx
@@ -572,11 +572,21 @@ class EWSStateService(EWSService):
     def call(self, **kwargs):
         raise NotImplementedError()
 
-class Subscribe(EWSStateService):
+class Subscribe(EWSStateService, EWSFolderService):
     SERVICE_NAME = 'Subscribe'
 
     PULL_SUBSCRIPTION = "PullSubscriptionRequest"
     PUSH_SUBSCRIPTION = "PushSubscriptionRequest"
+
+    class Subscription:
+
+        def __init__(self, folder, subscription_id, watermark):
+            self.folder = folder
+            self.subscription_id = subscription_id
+            self.watermark = watermark
+
+        def update_watermark(self, new_watermark):
+            self.watermark = new_watermark
 
     def __init__(self, protocol, subscription_type, **kwargs):
         if subscription_type == self.PUSH_SUBSCRIPTION:
@@ -584,52 +594,54 @@ class Subscribe(EWSStateService):
         self.subscription_type = subscription_type
         super().__init__(protocol=protocol, **kwargs)
 
-
-    def call(self, events, all_folders=False, folder_ids=None,
-             distinguished_folder_ids=None, timeout=10):
-        if folder_ids is None: folder_ids = []
-        if distinguished_folder_ids is None: distinguished_folder_ids = []
-
-        log.debug(
-            'Starting %s for events: %s folders: %s with timeout: %d',
-            self.subscription_type,
-            events,
-            'all folders' if all_folders else folder_ids + distinguished_folder_ids,
-            timeout
-        )
-
+    def _get_payload(self, events, folder_id=None,
+                     distinguished_folder_id=None, timeout=10):
         # Put together the xml request for starting the subscription
-        subscription = create_element("m:%s" % self.SERVICE_NAME)
+        payload = create_element("m:%s" % self.SERVICE_NAME)
         if self.subscription_type == self.PULL_SUBSCRIPTION:
+            subscription = create_element("m:%s" % self.subscription_type)
             folder_ids = create_element("t:FolderIds")
-            if all_folders:
-                child_subscription = create_element("m:%s" % self.subscription_type,
-                                                    SubscribeToAllFolders="true")
+            if folder_id:
+                folder_ids.append(create_element('t:FolderId', Id=folder_id))
+            elif distinguished_folder_id:
+                folder_ids.append(create_element('t:DistinguishedFolderId',
+                                                 Id=distinguished_folder_id))
             else:
-                assert folder_ids or distinguished_folder_ids
-                child_subscription = create_element("m:%s" % self.subscription_type)
-                for folder in folder_ids:
-                    folder_ids.append(create_element("t:FolderId", Id=folder))
-                for folder in distinguished_folder_ids:
-                    folder_ids.append(create_element("t:DistinguishedFolderId",
-                                                     Id=folder))
+                raise ValueError("Must have either folder_id or distinguished_folder_id")
 
-            child_subscription.append(folder_ids)
+            subscription.append(folder_ids)
 
             event_types = create_element("t:EventTypes")
             for event in events:
                 add_xml_child(event_types, "t:EventType", event)
-            child_subscription.append(event_types)
-            child_subscription.append(create_element("t:Watermark"))
-            add_xml_child(child_subscription, "t:Timeout", timeout)
+            subscription.append(event_types)
+            subscription.append(create_element("t:Watermark"))
+            add_xml_child(subscription, "t:Timeout", timeout)
 
         else:
             raise NotImplementedError(
                 "%s currently not implemented" % self.subscription_type)
 
-        subscription.append(child_subscription)
+        payload.append(subscription)
 
-        sub_response = self._get_response_xml(payload=subscription)[0]
+        return payload
+
+    def call(self, folder, events, timeout=10):
+        folder_id, distinguished_folder_id = folder.ids
+
+        log.debug(
+            'Starting %s for events: %s folder: %s with timeout: %d',
+            self.subscription_type,
+            events,
+            distinguished_folder_id if distinguished_folder_id else folder_id,
+            timeout
+        )
+
+        payload = self._get_payload(
+                    events=events, folder_id=folder_id,
+                    distinguished_folder_id=distinguished_folder_id,
+                    timeout=timeout)
+        sub_response = self._get_response_xml(payload=payload)[0]
 
         response_code = sub_response.find("{%s}ResponseCode" % MNS).text
         # message_text should be None unless there is an error
@@ -641,7 +653,7 @@ class Subscribe(EWSStateService):
         subscription_id = sub_response.find("{%s}SubscriptionId" % MNS).text
         watermark = sub_response.find("{%s}Watermark" % MNS).text
 
-        return subscription_id, watermark
+        return Subscribe.Subscription(folder, subscription_id, watermark)
 
 class Unsubscribe(EWSStateService):
     SERVICE_NAME = 'Unsubscribe'
@@ -649,7 +661,8 @@ class Unsubscribe(EWSStateService):
     def __init__(self, protocol):
         super().__init__(protocol=protocol)
 
-    def call(self, subscription_id):
+    def call(self, subscription):
+        subscription_id = subscription.subscription_id
         payload = create_element("m:%s" % self.SERVICE_NAME, xmlns=MNS)
         add_xml_child(payload, "SubscriptionId", subscription_id)
         unsub_response = self._get_response_xml(payload=payload)[0]
@@ -668,8 +681,12 @@ class GetEvents(EWSStateService):
 
     def __init__(self, protocol):
         super().__init__(protocol=protocol)
+        self.find_item = FindItem(protocol=protocol)
 
-    def call(self, subscription_id, watermark):
+    def call(self, subscription):
+        subscription_id = subscription.subscription_id
+        watermark = subscription.watermark
+        folder = subscription.folder
         events = []
         # We'll continue to make the calls until we are told that there are no
         #  "MoreEvents" or until something goes wrong
@@ -686,18 +703,25 @@ class GetEvents(EWSStateService):
             # message_text should be None unless there is an error
             message_text = event_response.find("{%s}MessageText" % MNS)
             if message_text is not None:
-                self._raise_errors(response_code, message_text.text, sub_response)
+                self._raise_errors(response_code, message_text.text, event_response)
 
             notification = event_response.find("{%s}Notification" % MNS)
 
-            for element in notification:
+            for element, item in zip(notification, itertools.repeat(None)):
                 if "Event" in element.tag and element.tag != "{%s}MoreEvents" % TNS:
-                    events.append(element)
+                    watermark = element.find("{%s}Watermark" % TNS).text
+                    item_id = element.find("{%s}ItemId" % TNS)
+                    if item_id is not None:
+                        item = subscription.folder.get_items(
+                                [(item_id.attrib['Id'],
+                                  item_id.attrib['ChangeKey'])])[0]
 
-            watermark = notification.find("{%s}PreviousWatermark" % TNS).text
+                    events.append((element, item))
 
             more_events = notification.find("{%s}MoreEvents" % TNS)
             if more_events.text == "false":
                 break
         log.debug("Events Found: %s" % str(events))
-        return events, watermark
+
+        subscription.update_watermark(watermark)
+        return events, subscription

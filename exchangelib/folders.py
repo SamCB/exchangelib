@@ -667,6 +667,15 @@ class Folder:
     def is_distinguished(self):
         return self.name.lower() == self.DISTINGUISHED_FOLDER_ID
 
+    @property
+    def ids(self):
+        """Return a tuple of ids that can be used to find the folder
+
+        The first is the FolderId, the second is the DistinguishedFolderId.
+        When using, expect one of them to be None.
+        """
+        return self.folder_id, self.DISTINGUISHED_FOLDER_ID
+
     @classmethod
     def attr_to_fielduri(cls, fieldname):
         return cls.item_model.fielduri_for_field(fieldname)
