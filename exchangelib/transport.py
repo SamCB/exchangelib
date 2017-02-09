@@ -156,6 +156,7 @@ def get_autodiscover_authtype(service_endpoint, data, timeout, verify):
     headers = {'Content-Type': 'text/xml; charset=utf-8'}
     with requests.sessions.Session() as s:
         r = s.head(url=service_endpoint, headers=headers, timeout=timeout, allow_redirects=False, verify=verify)
+        log.debug('Request response:\n', r)
         if r.status_code == 302:
             try:
                 redirect_url, redirect_server, redirect_has_ssl = get_redirect_url(r, require_relative=True)
