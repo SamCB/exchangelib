@@ -340,6 +340,7 @@ def _autodiscover_quick(credentials, email, protocol):
 def _get_autodiscover_auth_type(url, email, verify, encoding='utf-8'):
     try:
         data = _get_autodiscover_payload(email=email, encoding=encoding)
+        import pdb; pdb.set_trace()
         log.debug("Autodiscover Payload:\n", data)
         return transport.get_autodiscover_authtype(service_endpoint=url, data=data, timeout=TIMEOUT,
                                                    verify=verify)
