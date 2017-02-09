@@ -264,11 +264,11 @@ def _try_autodiscover(hostname, credentials, email, verify):
                                              verify=verify)
 
 
-def _autodiscover_hostname(hostname, credentials, email, has_ssl, verify, auth_type=None):
+def _autodiscover_hostname(hostname, credentials, email, has_ssl, verify, auth_type=None, resource='Autodiscover/Autodiscover.xml'):
     # Tries to get autodiscover data on a specific host. If we are HTTP redirected, we restart the autodiscover dance on
     # the new host.
     scheme = 'https' if has_ssl else 'http'
-    url = '%s://%s/Autodiscover/Autodiscover.xml' % (scheme, hostname)
+    url = '%s://%s/%s' % (scheme, hostname, resource)
     log.debug('Trying autodiscover on %s', url)
     if not auth_type:
         try:
@@ -290,6 +290,17 @@ def _autodiscover_hostname(hostname, credentials, email, has_ssl, verify, auth_t
                 log.debug('We were redirected to the same host')
                 raise_from(AutoDiscoverFailed('We were redirected to the same host'), e)
             raise_from(RedirectError(url='%s://%s' % ('https' if redirect_has_ssl else 'http', redirect_hostname)), e)
+        except Exception:
+            if not hostname.startswith("autodiscover"):
+                return _autodiscover_hostname(
+                    hostname="autodiscover.%s" % hostname,
+                    credentials, email, has_ssl, verify, auth_type, resource)
+            elif resource != "":
+                return _autodiscover_hostname(
+                    hostname, credentials, email, has_ssl, verify, auth_type,
+                    resource="")
+            else:
+                raise
 
     autodiscover_protocol = AutodiscoverProtocol(service_endpoint=url, credentials=credentials, auth_type=auth_type,
                                                  verify_ssl=verify)
@@ -340,8 +351,8 @@ def _autodiscover_quick(credentials, email, protocol):
 def _get_autodiscover_auth_type(url, email, verify, encoding='utf-8'):
     try:
         data = _get_autodiscover_payload(email=email, encoding=encoding)
-        import pdb; pdb.set_trace()
-        log.debug("Autodiscover Payload:\n", data)
+        # import pdb; pdb.set_trace()
+        log.debug("Autodiscover Payload:\n %s", data)
         return transport.get_autodiscover_authtype(service_endpoint=url, data=data, timeout=TIMEOUT,
                                                    verify=verify)
     except (TransportError, requests.exceptions.ConnectionError, requests.exceptions.Timeout,
