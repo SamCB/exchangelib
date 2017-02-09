@@ -293,7 +293,7 @@ def _autodiscover_hostname(hostname, credentials, email, has_ssl, verify, auth_t
         except Exception:
             if not hostname.startswith("autodiscover"):
                 return _autodiscover_hostname(
-                    hostname="autodiscover.%s" % hostname,
+                    "autodiscover.%s" % hostname,
                     credentials, email, has_ssl, verify, auth_type, resource)
             elif resource != "":
                 return _autodiscover_hostname(
