@@ -11,7 +11,7 @@ import requests.auth
 import requests_ntlm
 
 from .credentials import IMPERSONATION
-from .errors import UnauthorizedError, TransportError, RedirectError, RelativeRedirect
+from .errors import AutoDiscoverFailed, UnauthorizedError, TransportError, RedirectError, RelativeRedirect
 from .util import create_element, add_xml_child, is_xml, get_redirect_url
 
 log = logging.getLogger(__name__)
@@ -166,6 +166,10 @@ def get_autodiscover_authtype(service_endpoint, data, timeout, verify):
                 raise RedirectError(url=e.value)
             # Some MS servers are masters of messing up HTTP, issuing 302 to an error page with zero content.
             # Give this URL a chance with a POST request.
+        if 400 <= r.status_code <= 499:
+            # Something was wrong with our request. Maybe we sent it incorrectly, or maybe we sent it to the wrong
+            #  place. Fail and let us try again at a higher-level.
+            raise AutoDiscoverFailed(r.status_code)
         r = s.post(url=service_endpoint, headers=headers, data=data, timeout=timeout, allow_redirects=False,
                    verify=verify)
     return _get_auth_method_from_response(response=r)

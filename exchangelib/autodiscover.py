@@ -236,43 +236,42 @@ def discover(email, credentials, verify_ssl=True):
 def _try_autodiscover(hostname, credentials, email, verify):
     # Implements the full chain of autodiscover server discovery attempts. Tries to return autodiscover data from the
     # final host.
-    try:
-        return _autodiscover_hostname(hostname=hostname, credentials=credentials, email=email, has_ssl=True,
-                                      verify=verify)
-    except RedirectError as e:
-        return _try_autodiscover(e.server, credentials, email, verify=verify)
-    except AutoDiscoverFailed:
+    # When performing AutoDiscover one of three things can happen for any hostname:
+    #     1. We get through - host found
+    #     2. We get redirected - search where we were redirected
+    #     3. We get nothing, reach a "dead end" - search elsewehere
+    url_queue = [
+        'https://%s/Autodiscover/Autodiscover.xml' % (hostname),
+        'https://autodiscover.%s/Autodiscover/Autodiscover.xml' % (hostname),
+        'https://autodiscover.%s' % (hostname),
+        'http://%s/Autodiscover/Autodiscover.xml' % (hostname),
+        'http://autodiscover.%s/Autodiscover/Autodiscover.xml' % (hostname),
+        'http://autodiscover.%s' % (hostname),
+    ]
+    for url in url_queue:
         try:
-            return _autodiscover_hostname(hostname='autodiscover.%s' % hostname, credentials=credentials, email=email,
-                                          has_ssl=True, verify=verify)
+            return _autodiscover_hostname(url=url, credentials=credentials, email=email,
+                                          verify=verify)
         except RedirectError as e:
             return _try_autodiscover(e.server, credentials, email, verify=verify)
         except AutoDiscoverFailed:
-            try:
-                return _autodiscover_hostname(hostname='autodiscover.%s' % hostname, credentials=credentials,
-                                              email=email, has_ssl=False, verify=verify)
-            except RedirectError as e:
-                return _try_autodiscover(e.server, credentials, email, verify=verify)
-            except AutoDiscoverFailed:
-                try:
-                    hostname_from_dns = _get_canonical_name(hostname='autodiscover.%s' % hostname)
-                    if not hostname_from_dns:
-                        hostname_from_dns = _get_hostname_from_srv(hostname='autodiscover.%s' % hostname)
-                    # Start over with new hostname
-                    return _try_autodiscover(hostname=hostname_from_dns, credentials=credentials, email=email,
-                                             verify=verify)
-                except AutoDiscoverFailed:
-                    hostname_from_dns = _get_hostname_from_srv(hostname='_autodiscover._tcp.%s' % hostname)
-                    # Start over with new hostname
-                    return _try_autodiscover(hostname=hostname_from_dns, credentials=credentials, email=email,
-                                             verify=verify)
+            continue
 
+    alternate_hostname_queue = [
+        _get_canonical_name(hostname='autodiscover.%s' % hostname),
+        _get_hostname_from_srv(hostname='autodiscover.%s' % hostname)
+    ]
+    for alternate_hostname in alternate_hostname_queue:
+        if not alternate_hostname:
+            continue
+        try:
+            return _try_autodiscover(alternate_hostname, credentials=credentials, email=email, verify=verify)
+        except AutoDiscoverFailed:
+            continue
 
-def _autodiscover_hostname(hostname, credentials, email, has_ssl, verify, auth_type=None):
+def _autodiscover_hostname(url, credentials, email, verify, auth_type=None):
     # Tries to get autodiscover data on a specific host. If we are HTTP redirected, we restart the autodiscover dance on
     # the new host.
-    scheme = 'https' if has_ssl else 'http'
-    url = '%s://%s/Autodiscover/Autodiscover.xml' % (scheme, hostname)
     log.debug('Trying autodiscover on %s', url)
     if not auth_type:
         try:
@@ -301,8 +300,9 @@ def _autodiscover_hostname(hostname, credentials, email, has_ssl, verify, auth_t
     if r.status_code == 302:
         redirect_url, redirect_hostname, redirect_has_ssl = get_redirect_url(r)
         log.debug('We were redirected to %s', redirect_url)
-        # Don't raise RedirectError here because we need to pass the ssl and auth_type data
-        return _autodiscover_hostname(redirect_hostname, credentials, email, has_ssl=redirect_has_ssl, verify=verify,
+        # Don't raise RedirectError here because we already have all the ssl and
+        #  auth_type info that we should be passing.
+        return _autodiscover_hostname(redirect_url, credentials, email, verify=verify,
                                       auth_type=None)
     domain = get_domain(email)
     try:
