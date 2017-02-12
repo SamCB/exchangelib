@@ -351,7 +351,7 @@ def _get_autodiscover_auth_type(url, email, verify, encoding='utf-8'):
         if isinstance(e, RedirectError):
             raise
         log.debug('Error guessing auth type: %s', e)
-        raise AutoDiscoverFailed('Error guessing auth type: %s' % e)
+        raise_from(AutoDiscoverFailed('Error guessing auth type: %s' % e), e)
 
 
 def _get_autodiscover_payload(email, encoding='utf-8'):
