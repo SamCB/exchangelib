@@ -2,23 +2,118 @@
 Change Log
 ==========
 
+1.10.0
+------
+* Removed the ``verify_ssl`` argument to ``Account``, ``discover`` and ``Configuration``. If you need to disable SSL
+  verification, register a custom ``HTTPAdapter`` class. A sample adapter class is provided for convenience:
+
+  .. code-block:: python
+
+      from exchangelib.protocol import BaseProtocol, NoVerifyHTTPAdapter
+      BaseProcotol.HTTP_ADAPTER_CLS = NoVerifyHTTPAdapter
+
+
+1.9.6
+-----
+* Support new Office365 build numbers
+
+1.9.5
+-----
+* Added support for the ``effective_rights``field on items and folders.
+* Added support for custom ``requests`` transport adapters, to allow proxy support, custom TLS validation etc.
+* Default value for the ``affected_task_occurrences`` argument to ``Item.move_to_trash()``, ``Item.soft_delete()``
+  and ``Item.delete()`` was changed to ``'AllOccurrences'`` as a less surprising default when working with simple
+  tasks.
+* Added ``Task.complete()`` helper method to mark tasks as complete.
+
+1.9.4
+-----
+* Added minimal support for the ``PostItem`` item type
+* Added support for the ``DistributionList`` item type
+* Added support for receiving naive datetimes from the server. They will be localized using the new ``default_timezone``
+  attribute on ``Account``
+* Added experimental support for recurring calendar items. See examples in issue #37.
+
+1.9.3
+-----
+* Improved support for ``filter()``, ``.only()``, ``.order_by()`` etc. on indexed properties. It is now possible to
+  specify labels and subfields, e.g. ``.filter(phone_numbers=PhoneNumber(label='CarPhone', phone_number='123'))``
+  ``.filter(phone_numbers__CarPhone='123')``, ``.filter(physical_addresses__Home__street='Elm St. 123')``,
+  `.only('physical_addresses__Home__street')`` etc.
+* Improved performance of ``.order_by()`` when sorting on multiple fields.
+* Implemented QueryString search. You can now filter using an EWS QueryString, e.g. ``filter('subject:XXX')``
+
+1.9.2
+-----
+* Added ``EWSTimeZone.localzone()`` to get the local timezone
+* Support ``some_folder.get(item_id=..., changekey=...)`` as a shortcut to get a single item when you know the ID and
+  changekey.
+* Support attachments on Exchange 2007
+
+1.9.1
+-----
+* Fixed XML generation for Exchange 2010 and other picky server versions
+* Fixed timezone localization for ``EWSTimeZone`` created from a static timezone
+
+1.9.0
+-----
+* Expand support for ``ExtendedProperty`` to include all possible attributes. This required renaming the ``property_id``
+  attribute to ``property_set_id``.
+* When using the ``Credentials`` class, ``UnauthorizedError`` is now raised if the credentials are wrong.
+* Add a new ``version`` attribute to ``Configuration``, to force the server version if version guessing does not work.
+  Accepts a ``exchangelib.version.Version`` object.
+* Rework bulk operations ``Account.bulk_foo()`` and ``Account.fetch()`` to return some exceptions unraised, if it is deemed
+  the exception does not apply to all items. This means that e.g. ``fetch()`` can return a mix of ```Item`` and
+  ``ErrorItemNotFound`` instances, if only some of the requested ``ItemId`` were valid. Other exceptions will be raised
+  immediately, e.g. ``ErrorNonExistentMailbox`` because the exception applies to all items. It is the responsibility of
+  the caller to check the type of the returned values.
+* The ``Folder`` class has new attributes ``total_count``, ``unread_count`` and ``child_folder_count``, and a ``refresh()``
+  method to update these values.
+* The argument to ``Account.upload()`` was renamed from ``upload_data`` to just ``data``
+* Support for using a string search expression for ``Folder.filter()`` was removed. It was a cool idea but using QuerySet
+  chaining and ``Q`` objects is even cooler and provides the same functionality, and more.
+* Add support for ``reminder_due_by`` and ``reminder_minutes_before_start`` fields on ``Item`` objects. Submitted by
+  ``@vikipha``.
+* Added a new ``ServiceAccount`` class which is like ``Credentials`` but does what ``is_service_account`` did before. If
+  you need fault-tolerane and used ``Credentials(..., is_service_account=True)`` before, use ``ServiceAccount`` now. This
+  also disables fault-tolerance for the ``Credentials`` class, which is in line with what most users expected.
+* Added an optional ``update_fields`` attribute to ``save()`` to specify only some  fields to be updated.
+* Code in in ``folders.py`` has been split into multiple files, and some classes will have new import locaions. The most
+  commonly used classes have a shortcut in __init__.py
+* Added support for the ``exists`` lookup in filters, e.g. ``my_folder.filter(categories__exists=True|False)`` to filter
+  on the existence of that field on items in the folder.
+* When filtering, ``foo__in=value`` now requires the value to be a list, and ``foo__contains`` requires the value to be
+  a list if the field itself is a list, e.g. ``categories__contains=['a', 'b']``.
+* Added support for fields and enum entries that are only supported in some EWS versions
+* Added a new field ``Item.text_body`` which is a read-only version of HTML body content, where HTML tags are stripped
+  by the server. Only supported from Exchange 2013 and up.
+* Added a new choice ``WorkingElsewhere`` to the ``CalendarItem.legacy_free_busy_status`` enum. Only supported from
+  Exchange 2013 and up.
+
+
+1.8.1
+-----
+* Fix completely botched ``Message.from`` field renaming in 1.8.0
+* Improve performance of QuerySet slicing and indexing. For example, ``account.inbox.all()[10]`` and
+  ``account.inbox.all()[:10]`` now only fetch 10 items from the server even though ``account.inbox.all()`` could contain
+  thousands of messages.
+
 1.8.0
 -----
-* Allow setting `Mailbox` and `Attendee`-type attributes as plain strings, e.g.:
-* Renamed `Message.from` field to `Message.author`. `from` is a Python keyword so `from` could only be accessed as
-  `Getattr(my_essage, 'from')` which is just stupid.
-* Make `EWSTimeZone` Windows timezone name translation more robust
-* Add read-only `Message.message_id` which holds the Internet Message Id
-* Memory and speed improvements when sorting querysets using `order_by()` on a single field.
+* Renamed ``Message.from`` field to ``Message.author``. ``from`` is a Python keyword so ``from`` could only be accessed as
+  ``Getattr(my_essage, 'from')`` which is just stupid.
+* Make ``EWSTimeZone`` Windows timezone name translation more robust
+* Add read-only ``Message.message_id`` which holds the Internet Message Id
+* Memory and speed improvements when sorting querysets using ``order_by()`` on a single field.
+* Allow setting ``Mailbox`` and ``Attendee``-type attributes as plain strings, e.g.:
 
+  .. code-block:: python
 
-```python
-calendar_item.organizer =  'anne@example.com'
-calendar_item.required_attendees =  ['john@example.com', 'bill@example.com']
+      calendar_item.organizer =  'anne@example.com'
+      calendar_item.required_attendees =  ['john@example.com', 'bill@example.com']
 
-message.to_recipients =  ['john@example.com', 'anne@example.com']
+      message.to_recipients =  ['john@example.com', 'anne@example.com']
 
-```
 
 1.7.6
 -----
@@ -26,9 +121,9 @@ message.to_recipients =  ['john@example.com', 'anne@example.com']
 
 1.7.5
 -----
-* `Account.fetch()` and `Folder.fetch()` are now generators. They will do nothing before being evaluated.
-* Added optional `page_size` attribute to `QuerySet.iterator()` to specify the number of items to return per HTTP
-  request for large query results. Default `page_size` is 100.
+* ``Account.fetch()`` and ``Folder.fetch()`` are now generators. They will do nothing before being evaluated.
+* Added optional ``page_size`` attribute to ``QuerySet.iterator()`` to specify the number of items to return per HTTP
+  request for large query results. Default ``page_size`` is 100.
 * Many minor changes to make queries less greedy and return earlier
 
 1.7.4
@@ -69,9 +164,9 @@ message.to_recipients =  ['john@example.com', 'anne@example.com']
       item.detach(my_file)
 
   Be aware that adding and deleting attachments from items that are already created in Exchange (items that have an
-  `item_id`) will update the `changekey` of the item.
+  ``item_id``) will update the ``changekey`` of the item.
 
-* Implement `Item.headers` which contains custom Internet message headers. Primarily useful for `Message` objects.
+* Implement ``Item.headers`` which contains custom Internet message headers. Primarily useful for ``Message`` objects.
   Read-only for now.
 
 

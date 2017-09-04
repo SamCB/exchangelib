@@ -1,0 +1,15 @@
+---
+theme: jekyll-theme-minimal
+
+title : exchangelib
+author :
+  name : Erik Cederstrand
+  email : erik@cederstrand.dk
+  github : ecederstrand
+  twitter : ErikCederstrand
+
+markdown: kramdown
+
+github:
+  username  : ecederstrand
+  project   : exchangelib

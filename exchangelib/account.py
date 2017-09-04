@@ -6,15 +6,18 @@ from locale import getlocale
 from logging import getLogger
 
 from cached_property import threaded_cached_property
-from future.utils import raise_from, python_2_unicode_compatible
+from future.utils import python_2_unicode_compatible
 from six import text_type, string_types
 
 from .autodiscover import discover
 from .credentials import DELEGATE, IMPERSONATION
-from .errors import ErrorFolderNotFound, ErrorAccessDenied
+from .errors import ErrorFolderNotFound, ErrorAccessDenied, UnknownTimeZone
+from .ewsdatetime import EWSTimeZone, UTC
+from .fields import FieldPath
 from .folders import Root, Calendar, DeletedItems, Drafts, Inbox, Outbox, SentItems, JunkEmail, Tasks, Contacts, \
-    RecoverableItemsRoot, RecoverableItemsDeletions, Folder, Item, SHALLOW, DEEP, HARD_DELETE, \
-    AUTO_RESOLVE, SEND_TO_NONE, SAVE_ONLY, SEND_AND_SAVE_COPY, SEND_ONLY, SPECIFIED_OCCURRENCE_ONLY, \
+    RecoverableItemsRoot, RecoverableItemsDeletions, Folder, SHALLOW, DEEP
+from .items import Item, BulkCreateResult, HARD_DELETE, \
+    AUTO_RESOLVE, SEND_TO_NONE, SAVE_ONLY, SEND_AND_SAVE_COPY, SEND_ONLY, ALL_OCCURRENCIES, \
     DELETE_TYPE_CHOICES, MESSAGE_DISPOSITION_CHOICES, CONFLICT_RESOLUTION_CHOICES, AFFECTED_TASK_OCCURRENCES_CHOICES, \
     SEND_MEETING_INVITATIONS_CHOICES, SEND_MEETING_INVITATIONS_AND_CANCELLATIONS_CHOICES, \
     SEND_MEETING_CANCELLATIONS_CHOICES
@@ -28,12 +31,22 @@ log = getLogger(__name__)
 
 @python_2_unicode_compatible
 class Account(object):
+    """Models an Exchange server user account. The primary key for an account is its PrimarySMTPAddress
     """
-    Models an Exchange server user account. The primary key for an account is its PrimarySMTPAddress
-    """
-
     def __init__(self, primary_smtp_address, fullname=None, access_type=None, autodiscover=False, credentials=None,
-                 config=None, verify_ssl=True, locale=None):
+                 config=None, locale=None, default_timezone=None):
+        """
+        :param primary_smtp_address: The primary email address associated with the account on the Exchange server
+        :param fullname: The full name of the account. Optional.
+        :param access_type: The access type granted to 'credentials' for this account. Valid options are 'delegate'
+        (default) and 'impersonation'.
+        :param autodiscover: Whether to look up the EWS endpoint automatically using the autodiscover protocol.
+        :param credentials: A Credentials object containing valid credentials for this account.
+        :param config: A Configuration object containing EWS endpoint information. Required if autodiscover is disabled
+        :param locale: The locale of the user. Defaults to the locale of the host.
+        :param default_timezone: EWS may return some datetime values without timezone information. In this case, we will
+        assume values to be in the provided timezone. Defaults to the timezone of the host.
+        """
         if '@' not in primary_smtp_address:
             raise ValueError("primary_smtp_address '%s' is not an email address" % primary_smtp_address)
         self.primary_smtp_address = primary_smtp_address
@@ -47,14 +60,22 @@ class Account(object):
         if autodiscover:
             if not credentials:
                 raise AttributeError('autodiscover requires credentials')
-            self.primary_smtp_address, self.protocol = discover(email=self.primary_smtp_address,
-                                                                credentials=credentials, verify_ssl=verify_ssl)
             if config:
                 raise AttributeError('config is ignored when autodiscover is active')
+            self.primary_smtp_address, self.protocol = discover(email=self.primary_smtp_address,
+                                                                credentials=credentials)
         else:
             if not config:
                 raise AttributeError('non-autodiscover requires a config')
             self.protocol = config.protocol
+        try:
+            self.default_timezone = default_timezone or EWSTimeZone.localzone()
+        except (ValueError, UnknownTimeZone) as e:
+            # There is no translation from local timezone name to Windows timezone name, or e failed to find the 
+            # local timezone.
+            log.warning(e.args[0] + '. Fallback to UTC')
+            self.default_timezone = UTC
+        assert isinstance(self.default_timezone, EWSTimeZone)
         # We may need to override the default server version on a per-account basis because Microsoft may report one
         # server version up-front but delegate account requests to an older backend server.
         self.version = self.protocol.version
@@ -83,23 +104,23 @@ class Account(object):
     def _get_default_folder(self, fld_class):
         try:
             # Get the default folder
-            log.debug('Testing default %s folder with GetFolder', fld_class.__name__)
+            log.debug('Testing default %s folder with GetFolder', fld_class)
             return fld_class.get_distinguished(account=self)
         except ErrorAccessDenied:
             # Maybe we just don't have GetFolder access? Try FindItems instead
-            log.debug('Testing default %s folder with FindItem', fld_class.__name__)
+            log.debug('Testing default %s folder with FindItem', fld_class)
             fld = fld_class(account=self)  # Creates a folder instance with default distinguished folder name
-            list(fld.filter(subject='DUMMY'))  # Test if the folder exists
+            fld.test_access()
             return fld
-        except ErrorFolderNotFound as e:
+        except ErrorFolderNotFound:
             # There's no folder named fld_class.DISTINGUISHED_FOLDER_ID. Try to guess which folder is the default.
             # Exchange makes this unnecessarily difficult.
-            log.debug('Searching default %s folder in full folder list', fld_class.__name__)
+            log.debug('Searching default %s folder in full folder list', fld_class)
             flds = self.folders[fld_class]
             if not flds:
-                raise_from(ErrorFolderNotFound('No useable default %s folders' % fld_class.__name__), e)
+                raise ErrorFolderNotFound('No useable default %s folders' % fld_class)
             assert len(flds) == 1, 'Multiple possible default %s folders: %s' % (
-                fld_class.__name__, [text_type(f) for f in flds])
+                fld_class, [text_type(f) for f in flds])
             return flds[0]
 
     @threaded_cached_property
@@ -161,16 +182,16 @@ class Account(object):
         'items' is an iterable containing the Items we want to export
 
         Returns:
-        A list strings, the exported representation of the object
+        A list of strings, the exported representation of the object
         """
         is_empty, items = peek(items)
         if is_empty:
             # We accept generators, so it's not always convenient for caller to know up-front if 'items' is empty. Allow
             # empty 'items' and return early.
             return []
-        return list(ExportItems(self).call(items))
+        return list(ExportItems(self).call(items=items))
 
-    def upload(self, upload_data):
+    def upload(self, data):
         """
         Adds objects retrieved from export into the given folders
 
@@ -187,20 +208,26 @@ class Account(object):
                         (account.calendar, "ABCXYZ...")])
         -> [("idA", "changekey"), ("idB", "changekey"), ("idC", "changekey")]
         """
-        is_empty, upload_data = peek(upload_data)
+        is_empty, data = peek(data)
         if is_empty:
             # We accept generators, so it's not always convenient for caller to know up-front if 'upload_data' is empty.
             # Allow empty 'upload_data' and return early.
             return []
-        return list(UploadItems(self).call(upload_data))
+        return list(UploadItems(self).call(data=data))
 
     def bulk_create(self, folder, items, message_disposition=SAVE_ONLY, send_meeting_invitations=SEND_TO_NONE):
         """
-        Creates new items in 'folder'. 'items' is an iterable of Item objects. Returns a list of Item objects
-        in the same order as the input. The returned Item objects only contain item_id and changekey of the created
-        item, and item_id on any attachments that were also created.
-        'message_disposition' is only applicable to Message items.
-        'send_meeting_invitations' is only applicable to CalendarItem items.
+        Creates new items in 'folder'
+
+        :param folder: the folder to create the items in
+        :param items: an iterable of Item objects
+        :param message_disposition: only applicable to Message items. Possible values are specified in
+               MESSAGE_DISPOSITION_CHOICES
+        :param send_meeting_invitations: only applicable to CalendarItem items. Possible values are specified in
+               SEND_MEETING_INVITATIONS_CHOICES
+        :return: a list of either BulkCreateResult or exception instances in the same order as the input. The returned
+                 BulkCreateResult objects are normal Item objects except they only contain the 'item_id' and 'changekey'
+                 of the created item, and the 'item_id' on any attachments that were also created.
         """
         assert message_disposition in MESSAGE_DISPOSITION_CHOICES
         assert send_meeting_invitations in SEND_MEETING_INVITATIONS_CHOICES
@@ -209,7 +236,7 @@ class Account(object):
             if folder.account != self:
                 raise ValueError('"Folder must belong to this account')
         if message_disposition == SAVE_ONLY and folder is None:
-            raise AttributeError("Folder must be supplied when in send-only mode")
+            raise AttributeError("Folder must be supplied when in save-only mode")
         if message_disposition == SEND_AND_SAVE_COPY and folder is None:
             folder = self.sent  # 'Sent' is default EWS behaviour
         if message_disposition == SEND_ONLY and folder is not None:
@@ -229,7 +256,8 @@ class Account(object):
             # empty 'items' and return early.
             return []
         return list(
-            folder.item_model_from_tag(i.tag).from_xml(elem=i, account=self, folder=folder)
+            i if isinstance(i, Exception)
+            else BulkCreateResult.from_xml(elem=i, account=self)
             for i in CreateItem(account=self).call(
                 items=items,
                 folder=folder,
@@ -241,14 +269,17 @@ class Account(object):
     def bulk_update(self, items, conflict_resolution=AUTO_RESOLVE, message_disposition=SAVE_ONLY,
                     send_meeting_invitations_or_cancellations=SEND_TO_NONE, suppress_read_receipts=True):
         """
-        Updates items in the folder. 'items' is a dict containing:
+        Bulk updates existing items
 
-            Key: An Item object (calendar item, message, task or contact)
-            Value: a list of attributes that have changed on this object
-
-        'message_disposition' is only applicable to Message items.
-        'send_meeting_invitations_or_cancellations' is only applicable to CalendarItem items.
-        'suppress_read_receipts' is only supported from Exchange 2013.
+        :param items: a list of (Item, fieldnames) tuples, where 'Item' is an Item object, and 'fieldnames' is a list
+                      containing the attributes on this Item object that we want to be updated.
+        :param conflict_resolution: Possible values are specified in CONFLICT_RESOLUTION_CHOICES
+        :param message_disposition: only applicable to Message items. Possible values are specified in
+               MESSAGE_DISPOSITION_CHOICES
+        :param send_meeting_invitations_or_cancellations: only applicable to CalendarItem items. Possible values are
+               specified in SEND_MEETING_INVITATIONS_AND_CANCELLATIONS_CHOICES
+        :param suppress_read_receipts: nly supported from Exchange 2013. True or False
+        :return: a list of either (item_id, changekey) tuples or exception instances in the same order as the input.
         """
         assert conflict_resolution in CONFLICT_RESOLUTION_CHOICES
         assert message_disposition in MESSAGE_DISPOSITION_CHOICES
@@ -257,9 +288,10 @@ class Account(object):
         if message_disposition == SEND_ONLY:
             raise ValueError('Cannot send-only existing objects. Use SendItem service instead')
         # bulk_update() on a queryset does not make sense because there would be no opportunity to alter the items. In
-        # fact, it could be dangerous if the queryset is contains an '.only()'. This would wipe out certain fields
+        # fact, it could be dangerous if the queryset contains an '.only()'. This would wipe out certain fields
         # entirely.
-        assert not isinstance(items, QuerySet)
+        if isinstance(items, QuerySet):
+            raise ValueError('Cannot bulk update on a queryset')
         log.debug(
             'Updating items for %s (conflict_resolution %s, message_disposition: %s, send_meeting_invitations: %s)',
             self,
@@ -273,7 +305,7 @@ class Account(object):
             # empty 'items' and return early.
             return []
         return list(
-            Item.id_from_xml(i)
+            i if isinstance(i, Exception) else Item.id_from_xml(i)
             for i in UpdateItem(account=self).call(
                 items=items,
                 conflict_resolution=conflict_resolution,
@@ -284,13 +316,18 @@ class Account(object):
         )
 
     def bulk_delete(self, ids, delete_type=HARD_DELETE, send_meeting_cancellations=SEND_TO_NONE,
-                    affected_task_occurrences=SPECIFIED_OCCURRENCE_ONLY, suppress_read_receipts=True):
+                    affected_task_occurrences=ALL_OCCURRENCIES, suppress_read_receipts=True):
         """
-        Deletes items.
-        'ids' is an iterable of either (item_id, changekey) tuples or Item objects.
-        'send_meeting_cancellations' is only applicable to CalendarItem items.
-        'affected_task_occurrences' is only applicable for recurring Task items.
-        'suppress_read_receipts' is only supported from Exchange 2013.
+        Bulk deletes items.
+
+        :param ids: an iterable of either (item_id, changekey) tuples or Item objects.
+        :param delete_type: the type of delete to perform. Possible values are specified in DELETE_TYPE_CHOICES
+        :param send_meeting_cancellations: only applicable to CalendarItem. Possible values are specified in
+               SEND_MEETING_CANCELLATIONS_CHOICES.
+        :param affected_task_occurrences: only applicable for recurring Task items. Possible values are specified in
+               AFFECTED_TASK_OCCURRENCES_CHOICES.
+        :param suppress_read_receipts: only supported from Exchange 2013. True or False.
+        :return: a list of either True or exception instances in the same order as the input.
         """
         assert delete_type in DELETE_TYPE_CHOICES
         assert send_meeting_cancellations in SEND_MEETING_CANCELLATIONS_CHOICES
@@ -337,8 +374,7 @@ class Account(object):
             # We accept generators, so it's not always convenient for caller to know up-front if 'ids' is empty. Allow
             # empty 'ids' and return early.
             return []
-        return list(SendItem(account=self).call(items=ids, save_item_to_folder=save_copy,
-                                                saved_item_folder=copy_to_folder))
+        return list(SendItem(account=self).call(items=ids, saved_item_folder=copy_to_folder))
 
     def bulk_move(self, ids, to_folder):
         # Move items to another folder. Returns new IDs for the items that were moved
@@ -354,14 +390,14 @@ class Account(object):
             # empty 'ids' and return early.
             return []
         return list(
-            Item.id_from_xml(i)
+            i if isinstance(i, Exception) else Item.id_from_xml(i)
             for i in MoveItem(account=self).call(items=ids, to_folder=to_folder)
         )
 
     def fetch(self, ids, folder=None, only_fields=None):
         # 'folder' is used for validating only_fields
-        # 'only_fields' specifies which fields to fetch, instead of all possible fields.
-        validation_folder = folder or Folder  # Default to a folder type that supports all item types
+        # 'only_fields' specifies which fields to fetch, instead of all possible fields, as strings or FieldPaths.
+        validation_folder = folder or Folder(account=self)  # Default to a folder type that supports all item types
         # 'ids' could be an unevaluated QuerySet, e.g. if we ended up here via `fetch(ids=some_folder.filter(...))`. In
         # that case, we want to use its iterator. Otherwise, peek() will start a count() which is wasteful because we
         # need the item IDs immediately afterwards. iterator() will only do the bare minimum.
@@ -373,13 +409,16 @@ class Account(object):
             # empty 'ids' and return early.
             return
         if only_fields:
-            allowed_field_names = validation_folder.allowed_field_names()
-            for f in only_fields:
-                assert f in allowed_field_names
+            only_fields = validation_folder.validate_fields(fields=only_fields)
         else:
-            only_fields = validation_folder.allowed_field_names()
-        for i in GetItem(account=self).call(items=ids, folder=validation_folder, additional_fields=only_fields):
-            yield validation_folder.item_model_from_tag(i.tag).from_xml(elem=i, account=self, folder=folder)
+            only_fields = {FieldPath(field=f) for f in validation_folder.allowed_fields()}
+        for i in GetItem(account=self).call(items=ids, additional_fields=only_fields):
+            if isinstance(i, Exception):
+                yield i
+            else:
+                item = validation_folder.item_model_from_tag(i.tag).from_xml(elem=i, account=self)
+                item.folder = folder
+                yield item
 
     def __str__(self):
         txt = '%s' % self.primary_smtp_address
