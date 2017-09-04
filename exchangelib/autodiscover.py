@@ -267,6 +267,19 @@ def _try_autodiscover(hostname, credentials, email, verify):
                     return _try_autodiscover(hostname=hostname_from_dns, credentials=credentials, email=email,
                                              verify=verify)
 
+def _trim_www_redirect(redirect_hostname):
+    # Try the process on the new host, without 'www'. This is beyond the autodiscover protocol and an attempt to
+    # work around seriously misconfigured Exchange servers. It's probably better to just show the Exchange
+    # admins the report from https://testconnectivity.microsoft.com
+    if redirect_hostname.startswith('www.'):
+        return redirect_hostname[4:]
+    else:
+        return redirect_hostname
+
+def _validate_hostname_has_changed(redirect_hostname, original_hostname):
+    if redirect_hostname == original_hostname:
+        log.debug('We were redirected to the same host')
+        raise_from(AutoDiscoverFailed('We were redirected to the same host'), e)
 
 def _autodiscover_hostname(hostname, credentials, email, has_ssl, verify, auth_type=None):
     # Tries to get autodiscover data on a specific host. If we are HTTP redirected, we restart the autodiscover dance on
@@ -281,18 +294,16 @@ def _autodiscover_hostname(hostname, credentials, email, has_ssl, verify, auth_t
             log.debug(e)
             redirect_url, redirect_hostname, redirect_has_ssl = e.url, e.server, e.has_ssl
             log.debug('We were redirected to %s', redirect_url)
+
+            redirect_hostname = _trim_redirect_hostname(redirect_hostname)
+            _validate_hostname_has_changed(redirect_hostname, hostname)
+
             canonical_hostname = _get_canonical_name(redirect_hostname)
             if canonical_hostname:
                 log.debug('Canonical hostname is %s', canonical_hostname)
-                redirect_hostname = canonical_hostname
-            # Try the process on the new host, without 'www'. This is beyond the autodiscover protocol and an attempt to
-            # work around seriously misconfigured Exchange servers. It's probably better to just show the Exchange
-            # admins the report from https://testconnectivity.microsoft.com
-            if redirect_hostname.startswith('www.'):
-                redirect_hostname = redirect_hostname[4:]
-            if redirect_hostname == hostname:
-                log.debug('We were redirected to the same host')
-                raise_from(AutoDiscoverFailed('We were redirected to the same host'), e)
+                redirect_hostname = _trim_redirect_hostname(canonical_hostname)   
+                _validate_hostname_has_changed(redirect_hostname, hostname)
+                
             raise_from(RedirectError(url='%s://%s' % ('https' if redirect_has_ssl else 'http', redirect_hostname)), e)
 
     autodiscover_protocol = AutodiscoverProtocol(service_endpoint=url, credentials=credentials, auth_type=auth_type,
