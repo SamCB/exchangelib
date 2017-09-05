@@ -266,10 +266,10 @@ def _trim_www_redirect(redirect_hostname):
     else:
         return redirect_hostname
 
-def _validate_hostname_has_changed(redirect_hostname, original_hostname):
+def _validate_hostname_has_changed(redirect_hostname, original_hostname, redirect_error):
     if redirect_hostname == original_hostname:
         log.debug('We were redirected to the same host')
-        raise_from(AutoDiscoverFailed('We were redirected to the same host'), e)
+        raise_from(AutoDiscoverFailed('We were redirected to the same host'), redirect_error)
 
 def _get_auth_type_or_raise(url, email, hostname):
     # Returns the auth type of the URL. Raises any redirection errors
@@ -279,13 +279,13 @@ def _get_auth_type_or_raise(url, email, hostname):
         redirect_url, redirect_hostname, redirect_has_ssl = e.url, e.server, e.has_ssl
         log.debug('We were redirected to %s', redirect_url)
         redirect_hostname = _trim_www_redirect(redirect_hostname)
-        _validate_hostname_has_changed(redirect_hostname, hostname)
+        _validate_hostname_has_changed(redirect_hostname, hostname, e)
 
         canonical_hostname = _get_canonical_name(redirect_hostname)
         if canonical_hostname:
             log.debug('Canonical hostname is %s', canonical_hostname)
             redirect_hostname = _trim_www_redirect(canonical_hostname)
-            _validate_hostname_has_changed(redirect_hostname, hostname)
+            _validate_hostname_has_changed(redirect_hostname, hostname, e)
 
         raise_from(RedirectError(url='%s://%s' % ('https' if redirect_has_ssl else 'http', redirect_hostname)), e)
 
